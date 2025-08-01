@@ -126,6 +126,12 @@ public class DistributedMPCClient {
                 case "keygen_complete":
                     handleKeygenComplete(jsonMessage);
                     break;
+                case "sign_request":
+                    handleSignRequest(jsonMessage);
+                    break;
+                case "sign_complete":
+                    handleSignComplete(jsonMessage);
+                    break;
                 default:
                     System.out.println("⚠️ 未知消息类型: " + type);
             }
