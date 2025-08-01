@@ -188,6 +188,12 @@ func (s *CoordinatorServer) handleMessage(client *Client, msg *Message) {
 		s.handleKeygenRound(client, msg, 2)
 	case "keygen_complete":
 		s.handleKeygenComplete(client, msg)
+	case "refresh_round1":
+		s.handleRefreshRound(client, msg, 1)
+	case "refresh_round2":
+		s.handleRefreshRound(client, msg, 2)
+	case "refresh_complete":
+		s.handleRefreshComplete(client, msg)
 	default:
 		log.Printf("⚠️ 未知消息类型: %s", msg.Type)
 	}
@@ -195,17 +201,32 @@ func (s *CoordinatorServer) handleMessage(client *Client, msg *Message) {
 
 // handleCreateSession 处理创建会话请求
 func (s *CoordinatorServer) handleCreateSession(client *Client, msg *Message) {
+	// 解析Data字段中的JSON数据
+	var sessionData struct {
+		SessionType  string `json:"session_type"`
+		PartyID      int    `json:"party_id"`
+		Threshold    int    `json:"threshold"`
+		TotalParties int    `json:"total_parties"`
+	}
+	
+	log.Printf("🔍 原始Data字段: '%s'", msg.Data)
+	if err := json.Unmarshal([]byte(msg.Data), &sessionData); err != nil {
+		log.Printf("❌ 解析create_session数据失败: %v, 原始数据: '%s'", err, msg.Data)
+		return
+	}
+	log.Printf("✅ 解析成功: SessionType=%s, Threshold=%d, TotalParties=%d", sessionData.SessionType, sessionData.Threshold, sessionData.TotalParties)
+	
 	log.Printf("📥 收到来自客户端 %s 的create_session请求: SessionType=%s, Threshold=%d, TotalParties=%d", 
-		client.ID, msg.SessionType, msg.Threshold, msg.TotalParties)
+		client.ID, sessionData.SessionType, sessionData.Threshold, sessionData.TotalParties)
 	
 	s.mu.Lock()
 	// 检查是否已经有活跃的会话
 	var existingSession *Session
 	for sessionID, session := range s.sessions {
-		if session.Type == msg.SessionType && 
+		if session.Type == sessionData.SessionType && 
 		   session.Status != "completed" &&
-		   session.Threshold == msg.Threshold &&
-		   session.TotalParties == msg.TotalParties &&
+		   session.Threshold == sessionData.Threshold &&
+		   session.TotalParties == sessionData.TotalParties &&
 		   len(session.Participants) < session.TotalParties {
 			existingSession = session
 			log.Printf("🔄 找到匹配的现有会话 %s (当前参与者: %d/%d)", 
@@ -247,9 +268,14 @@ func (s *CoordinatorServer) handleCreateSession(client *Client, msg *Message) {
 		s.mu.Unlock()
 		
 		// 通知客户端会话已创建
+		responseData := map[string]interface{}{
+			"session_id": existingSession.ID,
+		}
+		responseDataBytes, _ := json.Marshal(responseData)
 		response := &Message{
 			Type:      "session_created",
 			SessionID: existingSession.ID,
+			Data:      string(responseDataBytes),
 		}
 		
 		log.Printf("📤 向客户端 %s 发送session_created消息: SessionID=%s", 
@@ -262,9 +288,14 @@ func (s *CoordinatorServer) handleCreateSession(client *Client, msg *Message) {
 			
 			// 通知所有参与者会话准备就绪
 			for _, participant := range participants {
+				responseData := map[string]interface{}{
+					"session_id": existingSession.ID,
+				}
+				responseDataBytes, _ := json.Marshal(responseData)
 				response := &Message{
 					Type:      "session_created",
 					SessionID: existingSession.ID,
+					Data:      string(responseDataBytes),
 				}
 				s.sendToClient(participant, response)
 			}
@@ -280,11 +311,11 @@ func (s *CoordinatorServer) handleCreateSession(client *Client, msg *Message) {
 
 	session := &Session{
 		ID:           sessionID,
-		Type:         msg.SessionType,
+		Type:         sessionData.SessionType,
 		Status:       "created",
 		Participants: []string{client.ID},
-		Threshold:    msg.Threshold,
-		TotalParties: msg.TotalParties,
+		Threshold:    sessionData.Threshold,
+		TotalParties: sessionData.TotalParties,
 		CreatedAt:    time.Now(),
 		Data:         make(map[string]interface{}),
 	}
@@ -292,15 +323,20 @@ func (s *CoordinatorServer) handleCreateSession(client *Client, msg *Message) {
 	s.sessions[sessionID] = session
 
 	log.Printf("🆕 创建新会话 %s，类型: %s，阈值: %d，总参与方: %d", 
-		sessionID, msg.SessionType, msg.Threshold, msg.TotalParties)
+		sessionID, sessionData.SessionType, sessionData.Threshold, sessionData.TotalParties)
 
 	// 释放主锁后再发送消息
 	s.mu.Unlock()
 
 	// 通知客户端会话已创建
+	responseData := map[string]interface{}{
+		"session_id": sessionID,
+	}
+	responseDataBytes, _ := json.Marshal(responseData)
 	response := &Message{
 		Type:      "session_created",
 		SessionID: sessionID,
+		Data:      string(responseDataBytes),
 	}
 
 	log.Printf("📤 向客户端 %s 发送session_created消息: SessionID=%s", 
@@ -358,13 +394,23 @@ func (s *CoordinatorServer) waitForParticipants(sessionID string) {
 
 				log.Printf("🎯 会话 %s 准备就绪，参与者: %v", sessionID, session.Participants)
 
-				// 通知所有参与者开始密钥生成
+				// 根据会话类型通知所有参与者开始相应操作
+				log.Printf("🔍 会话类型检查: session.Type='%s'", session.Type)
+				var messageType string
+				if session.Type == "refresh" {
+					messageType = "start_refresh"
+					log.Printf("✅ 设置消息类型为: %s", messageType)
+				} else {
+					messageType = "start_keygen"
+					log.Printf("⚠️ 设置消息类型为: %s (会话类型: %s)", messageType, session.Type)
+				}
+				
 				for _, client := range clients {
 					response := &Message{
-						Type:      "start_keygen",
+						Type:      messageType,
 						SessionID: sessionID,
 					}
-					log.Printf("📤 向客户端 %s 发送start_keygen信号", client.ID)
+					log.Printf("📤 向客户端 %s 发送%s信号", client.ID, messageType)
 					s.sendToClient(client.ID, response)
 				}
 				return
@@ -655,5 +701,91 @@ func main() {
 
 	if err := r.Run(port); err != nil {
 		log.Fatalf("❌ 服务器启动失败: %v", err)
+	}
+}
+
+// handleRefreshRound 处理refresh轮次消息
+func (s *CoordinatorServer) handleRefreshRound(client *Client, msg *Message, round int) {
+	log.Printf("🔄 处理来自客户端 %s 的refresh round %d消息，会话: %s", 
+		client.ID, round, msg.SessionID)
+
+	s.mu.RLock()
+	session, exists := s.sessions[msg.SessionID]
+	s.mu.RUnlock()
+
+	if !exists {
+		log.Printf("❌ 会话 %s 不存在", msg.SessionID)
+		return
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	// 存储轮次数据
+	roundKey := fmt.Sprintf("refresh_round%d", round)
+	if session.Data[roundKey] == nil {
+		session.Data[roundKey] = make(map[string]interface{})
+	}
+	roundData := session.Data[roundKey].(map[string]interface{})
+	roundData[client.ID] = msg.Data
+
+	log.Printf("💾 存储客户端 %s 的refresh round %d数据，当前已收到: %d/%d", 
+		client.ID, round, len(roundData), len(session.Participants))
+
+	// 检查是否所有参与者都已提交数据
+	if len(roundData) >= len(session.Participants) {
+		log.Printf("✅ Refresh round %d 所有数据已收集完成，开始广播", round)
+
+		// 广播给所有参与者
+		for _, participantID := range session.Participants {
+			roundDataJSON, _ := json.Marshal(roundData)
+			response := &Message{
+				Type:      fmt.Sprintf("refresh_round%d_data", round),
+				SessionID: msg.SessionID,
+				Data:      string(roundDataJSON),
+			}
+			s.sendToClient(participantID, response)
+		}
+	}
+}
+
+// handleRefreshComplete 处理refresh完成消息
+func (s *CoordinatorServer) handleRefreshComplete(client *Client, msg *Message) {
+	log.Printf("🎉 客户端 %s 完成refresh，会话: %s", client.ID, msg.SessionID)
+
+	s.mu.RLock()
+	session, exists := s.sessions[msg.SessionID]
+	s.mu.RUnlock()
+
+	if !exists {
+		log.Printf("❌ 会话 %s 不存在", msg.SessionID)
+		return
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	// 记录完成状态
+	if session.Data["refresh_completed"] == nil {
+		session.Data["refresh_completed"] = make(map[string]bool)
+	}
+	completedMap := session.Data["refresh_completed"].(map[string]bool)
+	completedMap[client.ID] = true
+
+	log.Printf("📊 Refresh完成状态: %d/%d", len(completedMap), len(session.Participants))
+
+	// 检查是否所有参与者都已完成
+	if len(completedMap) >= len(session.Participants) {
+		log.Printf("🎊 所有参与者已完成refresh，会话: %s", msg.SessionID)
+		session.Status = "refresh_completed"
+
+		// 通知所有参与者refresh已完成
+		for _, participantID := range session.Participants {
+			response := &Message{
+				Type:      "refresh_complete",
+				SessionID: msg.SessionID,
+			}
+			s.sendToClient(participantID, response)
+		}
 	}
 }

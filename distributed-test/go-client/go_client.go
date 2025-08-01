@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/decred/dcrd/dcrec/secp256k1/v2"
+	"github.com/decred/dcrd/dcrec/edwards/v2"
 	"log"
 	"net/url"
 	"os"
@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/okx/threshold-lib/tss"
 	"github.com/okx/threshold-lib/tss/key/dkg"
+	"github.com/okx/threshold-lib/tss/key/reshare"
 )
 
 // DistributedGoClient Go客户端结构
@@ -37,6 +38,13 @@ type DistributedGoClient struct {
 	round1Messages map[int]*tss.Message // 存储第一轮消息
 	round2Messages map[int]*tss.Message // 存储第二轮消息
 	finalKeyData   *tss.KeyStep3Data    // 最终生成的密钥数据
+
+	// Refresh相关字段
+	refreshDone    chan bool
+	refreshSetup   interface{} // refresh设置信息
+	refreshRound1Messages map[int]*tss.Message // 存储refresh第一轮消息
+	refreshRound2Messages map[int]*tss.Message // 存储refresh第二轮消息
+	refreshedKeyData      *tss.KeyStep3Data    // refresh后的密钥数据
 }
 
 // Message WebSocket消息结构
@@ -56,7 +64,7 @@ type Message struct {
 // NewDistributedGoClient 创建新的Go客户端
 func NewDistributedGoClient(clientID, serverURL string, partyID, threshold, totalParties int) *DistributedGoClient {
 	// 使用secp256k1曲线
-	curve := secp256k1.S256()
+	curve := edwards.Edwards()
 
 	// 创建DKG设置
 	dkgSetup := dkg.NewSetUp(partyID, totalParties, curve)
@@ -72,6 +80,10 @@ func NewDistributedGoClient(clientID, serverURL string, partyID, threshold, tota
 		curve:          curve,
 		round1Messages: make(map[int]*tss.Message),
 		round2Messages: make(map[int]*tss.Message),
+		// 初始化refresh相关字段
+		refreshDone:           make(chan bool, 1),
+		refreshRound1Messages: make(map[int]*tss.Message),
+		refreshRound2Messages: make(map[int]*tss.Message),
 	}
 }
 
@@ -138,6 +150,14 @@ func (c *DistributedGoClient) handleMessage(msg *Message) {
 		c.handleKeygenRound2Data(msg)
 	case "keygen_complete":
 		c.handleKeygenComplete(msg)
+	case "start_refresh":
+		c.handleStartRefresh(msg)
+	case "refresh_round1_data":
+		c.handleRefreshRound1Data(msg)
+	case "refresh_round2_data":
+		c.handleRefreshRound2Data(msg)
+	case "refresh_complete":
+		c.handleRefreshComplete(msg)
 	case "error":
 		log.Printf("❌ Go客户端 %s 收到错误: %s", c.ClientID, msg.Error)
 	default:
@@ -176,6 +196,20 @@ func (c *DistributedGoClient) StartKeygen() error {
 	// 等待一小段时间确保连接稳定
 	time.Sleep(500 * time.Millisecond)
 
+	// 构建会话数据
+	sessionData := map[string]interface{}{
+		"session_type":  "keygen",
+		"party_id":      c.PartyID,
+		"threshold":     c.Threshold,
+		"total_parties": c.TotalParties,
+	}
+
+	// 将会话数据转换为JSON字符串
+	dataBytes, err := json.Marshal(sessionData)
+	if err != nil {
+		return fmt.Errorf("序列化会话数据失败: %v", err)
+	}
+
 	// 请求创建会话
 	msg := &Message{
 		Type:         "create_session",
@@ -183,12 +217,13 @@ func (c *DistributedGoClient) StartKeygen() error {
 		SessionType:  "keygen",
 		Threshold:    c.Threshold,
 		TotalParties: c.TotalParties,
+		Data:         string(dataBytes),
 	}
 
 	log.Printf("📤 Go客户端 %s 正在发送create_session请求: Type=%s, SessionType=%s, Threshold=%d, TotalParties=%d",
 		c.ClientID, msg.Type, msg.SessionType, msg.Threshold, msg.TotalParties)
 
-	err := c.sendMessage(msg)
+	err = c.sendMessage(msg)
 	if err != nil {
 		return fmt.Errorf("发送创建会话消息失败: %v", err)
 	}
@@ -511,6 +546,21 @@ func (c *DistributedGoClient) performKeygenRound3() {
 
 	// 保存最终密钥数据
 	c.finalKeyData = keyData
+	
+	// 将密钥数据保存到文件
+	keyFileName := fmt.Sprintf("test_key_party%d.key", c.PartyID)
+	keyDataBytes, err := json.Marshal(keyData)
+	if err != nil {
+		log.Printf("❌ Go客户端 %s 序列化密钥数据失败: %v", c.ClientID, err)
+	} else {
+		err = os.WriteFile(keyFileName, keyDataBytes, 0644)
+		if err != nil {
+			log.Printf("❌ Go客户端 %s 保存密钥文件失败: %v", c.ClientID, err)
+		} else {
+			log.Printf("💾 Go客户端 %s 密钥已保存到文件: %s", c.ClientID, keyFileName)
+		}
+	}
+	
 	log.Printf("✅ Go客户端 %s 密钥生成成功完成！", c.ClientID)
 
 	// 发送完成消息
@@ -541,6 +591,213 @@ func (c *DistributedGoClient) handleKeygenComplete(msg *Message) {
 // GetDkgKey 获取DKG密钥数据
 func (c *DistributedGoClient) GetDkgKey() *tss.KeyStep3Data {
 	return c.finalKeyData
+}
+
+// StartRefresh 启动密钥刷新
+func (c *DistributedGoClient) StartRefresh() error {
+	log.Printf("🔄 Go客户端 %s 开始密钥刷新...", c.ClientID)
+
+	// 等待一小段时间确保连接稳定
+	time.Sleep(500 * time.Millisecond)
+
+	// 请求创建刷新会话
+	sessionData := map[string]interface{}{
+		"session_type": "refresh",
+		"party_id":     c.PartyID,
+		"threshold":    c.Threshold,
+		"total_parties": c.TotalParties,
+	}
+	dataBytes, _ := json.Marshal(sessionData)
+	msg := &Message{
+		Type:     "create_session",
+		ClientID: c.ClientID,
+		Data:     string(dataBytes),
+	}
+
+	return c.sendMessage(msg)
+}
+
+// handleStartRefresh 处理开始刷新
+func (c *DistributedGoClient) handleStartRefresh(msg *Message) {
+	log.Printf("🔄 Go客户端 %s 开始执行密钥刷新第一轮...", c.ClientID)
+
+	// 使用现有的密钥数据进行刷新
+	if c.finalKeyData == nil {
+		log.Printf("❌ Go客户端 %s 没有可用的密钥数据进行刷新", c.ClientID)
+		return
+	}
+
+	// 创建刷新设置
+	devoteList := [2]int{c.PartyID, c.TotalParties}
+	refreshInfo := reshare.NewRefresh(c.PartyID, c.TotalParties, devoteList, c.finalKeyData.ShareI, c.finalKeyData.PublicKey)
+	c.refreshSetup = refreshInfo
+
+	// 执行第一轮
+	round1Data, err := refreshInfo.DKGStep1()
+	if err != nil {
+		log.Printf("❌ Go客户端 %s 刷新第一轮失败: %v", c.ClientID, err)
+		return
+	}
+
+	// 发送第一轮数据
+	round1DataMap := map[string]interface{}{
+		"party_id": c.PartyID,
+		"round1_data": round1Data,
+	}
+	round1DataBytes, _ := json.Marshal(round1DataMap)
+	refreshMsg := &Message{
+		Type:     "refresh_round1",
+		ClientID: c.ClientID,
+		Data:     string(round1DataBytes),
+	}
+
+	err = c.sendMessage(refreshMsg)
+	if err != nil {
+		log.Printf("❌ Go客户端 %s 发送刷新第一轮数据失败: %v", c.ClientID, err)
+	}
+}
+
+// handleRefreshRound1Data 处理刷新第一轮数据
+func (c *DistributedGoClient) handleRefreshRound1Data(msg *Message) {
+	log.Printf("📨 Go客户端 %s 收到刷新第一轮数据", c.ClientID)
+
+	// 解析数据
+	var refreshData struct {
+		PartyID    int          `json:"party_id"`
+		Round1Data *tss.Message `json:"round1_data"`
+	}
+	err := json.Unmarshal([]byte(msg.Data), &refreshData)
+	if err != nil {
+		log.Printf("❌ Go客户端 %s 解析刷新第一轮数据失败: %v", c.ClientID, err)
+		return
+	}
+	partyID := refreshData.PartyID
+	round1Data := refreshData.Round1Data
+
+	// 存储第一轮消息
+	c.refreshRound1Messages[partyID] = round1Data
+
+	// 检查是否收集到所有第一轮消息
+	if len(c.refreshRound1Messages) == c.TotalParties {
+		log.Printf("✅ Go客户端 %s 收集到所有刷新第一轮消息，开始第二轮", c.ClientID)
+		c.executeRefreshRound2()
+	}
+}
+
+// executeRefreshRound2 执行刷新第二轮
+func (c *DistributedGoClient) executeRefreshRound2() {
+	refreshInfo := c.refreshSetup.(*reshare.RefreshInfo)
+
+	// 转换消息格式
+	var round1Messages []*tss.Message
+	for _, msg := range c.refreshRound1Messages {
+		round1Messages = append(round1Messages, msg)
+	}
+
+	// 执行第二轮
+	round2Data, err := refreshInfo.DKGStep2(round1Messages)
+	if err != nil {
+		log.Printf("❌ Go客户端 %s 刷新第二轮失败: %v", c.ClientID, err)
+		return
+	}
+
+	// 发送第二轮数据
+	round2DataMap := map[string]interface{}{
+		"party_id": c.PartyID,
+		"round2_data": round2Data,
+	}
+	round2DataBytes, _ := json.Marshal(round2DataMap)
+	refreshMsg := &Message{
+		Type:     "refresh_round2",
+		ClientID: c.ClientID,
+		Data:     string(round2DataBytes),
+	}
+
+	err = c.sendMessage(refreshMsg)
+	if err != nil {
+		log.Printf("❌ Go客户端 %s 发送刷新第二轮数据失败: %v", c.ClientID, err)
+	}
+}
+
+// handleRefreshRound2Data 处理刷新第二轮数据
+func (c *DistributedGoClient) handleRefreshRound2Data(msg *Message) {
+	log.Printf("📨 Go客户端 %s 收到刷新第二轮数据", c.ClientID)
+
+	// 解析数据
+	var refreshData struct {
+		PartyID    int          `json:"party_id"`
+		Round2Data *tss.Message `json:"round2_data"`
+	}
+	err := json.Unmarshal([]byte(msg.Data), &refreshData)
+	if err != nil {
+		log.Printf("❌ Go客户端 %s 解析刷新第二轮数据失败: %v", c.ClientID, err)
+		return
+	}
+	partyID := refreshData.PartyID
+	round2Data := refreshData.Round2Data
+
+	// 存储第二轮消息
+	c.refreshRound2Messages[partyID] = round2Data
+
+	// 检查是否收集到所有第二轮消息
+	if len(c.refreshRound2Messages) == c.TotalParties {
+		log.Printf("✅ Go客户端 %s 收集到所有刷新第二轮消息，开始第三轮", c.ClientID)
+		c.executeRefreshRound3()
+	}
+}
+
+// executeRefreshRound3 执行刷新第三轮
+func (c *DistributedGoClient) executeRefreshRound3() {
+	refreshInfo := c.refreshSetup.(*reshare.RefreshInfo)
+
+	// 将 refreshRound2Messages 转换为 []*tss.Message
+	var round2Messages []*tss.Message
+	for _, msg := range c.refreshRound2Messages {
+		round2Messages = append(round2Messages, msg)
+	}
+
+	// 执行第三轮
+	refreshedKeyData, err := refreshInfo.DKGStep3(round2Messages)
+	if err != nil {
+		log.Printf("❌ Go客户端 %s 刷新第三轮失败: %v", c.ClientID, err)
+		return
+	}
+
+	// 保存刷新后的密钥数据
+	c.refreshedKeyData = refreshedKeyData
+
+	log.Printf("🎉 Go客户端 %s 密钥刷新完成！", c.ClientID)
+
+	// 发送完成消息
+	completeDataMap := map[string]interface{}{
+		"party_id": c.PartyID,
+		"success":  true,
+	}
+	completeDataBytes, _ := json.Marshal(completeDataMap)
+	refreshMsg := &Message{
+		Type:     "refresh_complete",
+		ClientID: c.ClientID,
+		Data:     string(completeDataBytes),
+	}
+
+	err = c.sendMessage(refreshMsg)
+	if err != nil {
+		log.Printf("❌ Go客户端 %s 发送刷新完成消息失败: %v", c.ClientID, err)
+	}
+
+	// 通知刷新完成
+	c.refreshDone <- true
+}
+
+// handleRefreshComplete 处理刷新完成
+func (c *DistributedGoClient) handleRefreshComplete(msg *Message) {
+	log.Printf("🎉 Go客户端 %s 收到密钥刷新完成通知", c.ClientID)
+	c.refreshDone <- true
+}
+
+// GetRefreshedKey 获取刷新后的密钥数据
+func (c *DistributedGoClient) GetRefreshedKey() *tss.KeyStep3Data {
+	return c.refreshedKeyData
 }
 
 func main() {
