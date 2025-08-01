@@ -1,0 +1,5 @@
+2025/07/30 13:14:14 Starting MPC Server: 移动应用服务器 (mobile-app)
+2025/07/30 13:14:14 Connection Mode: client
+2025/07/30 13:14:14 Capabilities: [keygen reshare sign]
+2025/07/30 13:14:14 Starting in client mode, will connect to: ws://localhost:8082/ws
+2025/07/30 13:14:48 Shutting down client mobile-app...

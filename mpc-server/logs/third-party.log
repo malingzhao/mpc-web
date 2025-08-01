@@ -1,0 +1,14 @@
+2025/07/30 13:14:12 Starting MPC Server: 第三方服务器 (third-party)
+2025/07/30 13:14:12 Connection Mode: server
+2025/07/30 13:14:12 Capabilities: [keygen reshare]
+2025/07/30 13:14:12 Starting in server mode on port 8081
+2025/07/30 13:14:12 HTTP API disabled for server third-party (协作节点模式)
+2025/07/30 13:14:12 Server third-party listening on :8081
+2025/07/30 13:14:12 Connecting to peer servers...
+2025/07/30 13:14:12 Connecting to peer enterprise at ws://localhost:8082/ws?client_id=third-party
+2025/07/30 13:14:12 Failed to connect to peer enterprise: failed to dial ws://localhost:8082/ws?client_id=third-party: dial tcp [::1]:8082: connect: connection refused
+2025/07/30 13:14:12 Successfully connected to peer servers
+2025/07/30 13:14:13 Client enterprise connected
+[GIN] 2025/07/30 - 13:14:13 | 200 |      35.625µs |             ::1 | GET      "/ws?client_id=enterprise"
+[GIN] 2025/07/30 - 13:14:17 | 200 |    1.125083ms |             ::1 | GET      "/health"
+2025/07/30 13:14:43 Shutting down server third-party...

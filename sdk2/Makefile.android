@@ -1,0 +1,194 @@
+# Android MPC SDK Makefile
+# 构建Android JNI库和相关组件
+
+# 配置变量
+ANDROID_NDK ?= $(ANDROID_HOME)/ndk/25.1.8937393
+ANDROID_API_LEVEL ?= 21
+ANDROID_ARCH ?= arm64-v8a
+
+# 工具链配置
+TOOLCHAIN = $(ANDROID_NDK)/toolchains/llvm/prebuilt/darwin-x86_64
+CC = $(TOOLCHAIN)/bin/aarch64-linux-android$(ANDROID_API_LEVEL)-clang
+AR = $(TOOLCHAIN)/bin/llvm-ar
+STRIP = $(TOOLCHAIN)/bin/llvm-strip
+
+# 编译标志
+CFLAGS = -fPIC -O2 -Wall -Wextra
+LDFLAGS = -shared -Wl,--no-undefined
+
+# 目录配置
+SRC_DIR = .
+BUILD_DIR = build/android
+JNI_DIR = $(BUILD_DIR)/jni
+LIBS_DIR = $(BUILD_DIR)/libs/$(ANDROID_ARCH)
+
+# 源文件
+JNI_SOURCES = mpc_jni.c
+JAVA_SOURCES = com/example/mpctest/MPCNative.java \
+               com/example/mpctest/AndroidMPCExample.java
+
+# 目标文件
+JNI_LIB = $(LIBS_DIR)/libmpcjni.so
+JAVA_CLASSES = $(JAVA_SOURCES:.java=.class)
+
+# 默认目标
+.PHONY: all clean android-lib java-classes test help
+
+all: android-lib java-classes
+
+# 创建构建目录
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+	mkdir -p $(JNI_DIR)
+	mkdir -p $(LIBS_DIR)
+
+# 构建Android JNI库
+android-lib: $(JNI_LIB)
+
+$(JNI_LIB): $(JNI_SOURCES) libmpc.so | $(BUILD_DIR)
+	@echo "构建Android JNI库..."
+	$(CC) $(CFLAGS) $(LDFLAGS) \
+		-I$(ANDROID_NDK)/sysroot/usr/include \
+		-I$(SRC_DIR) \
+		-o $@ $(JNI_SOURCES) \
+		-L$(SRC_DIR) -lmpc
+	$(STRIP) $@
+	@echo "JNI库构建完成: $@"
+
+# 编译Java类
+java-classes: $(JAVA_CLASSES)
+
+%.class: %.java
+	@echo "编译Java类: $<"
+	javac -cp . $<
+
+# 生成JNI头文件
+jni-headers: $(JAVA_CLASSES)
+	@echo "生成JNI头文件..."
+	javah -cp . -jni com.example.mpctest.MPCNative
+	@echo "JNI头文件生成完成"
+
+# 构建完整的Android AAR包
+android-aar: android-lib java-classes
+	@echo "构建Android AAR包..."
+	mkdir -p $(BUILD_DIR)/aar/jni/$(ANDROID_ARCH)
+	mkdir -p $(BUILD_DIR)/aar/classes
+	
+	# 复制JNI库
+	cp $(JNI_LIB) $(BUILD_DIR)/aar/jni/$(ANDROID_ARCH)/
+	cp libmpc.so $(BUILD_DIR)/aar/jni/$(ANDROID_ARCH)/
+	
+	# 复制Java类
+	cp -r com $(BUILD_DIR)/aar/classes/
+	
+	# 创建AndroidManifest.xml
+	echo '<?xml version="1.0" encoding="utf-8"?>' > $(BUILD_DIR)/aar/AndroidManifest.xml
+	echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"' >> $(BUILD_DIR)/aar/AndroidManifest.xml
+	echo '    package="com.example.mpctest">' >> $(BUILD_DIR)/aar/AndroidManifest.xml
+	echo '</manifest>' >> $(BUILD_DIR)/aar/AndroidManifest.xml
+	
+	# 打包AAR
+	cd $(BUILD_DIR)/aar && zip -r ../mpc-android-sdk.aar *
+	@echo "Android AAR包构建完成: $(BUILD_DIR)/mpc-android-sdk.aar"
+
+# 测试编译
+test: android-lib java-classes
+	@echo "运行测试编译..."
+	javac -cp . com/example/mpctest/AndroidMPCExample.java
+	@echo "测试编译成功"
+
+# 清理构建文件
+clean:
+	@echo "清理构建文件..."
+	rm -rf $(BUILD_DIR)
+	find . -name "*.class" -delete
+	find . -name "*.h" -name "*_MPCNative*" -delete
+	@echo "清理完成"
+
+# 检查依赖
+check-deps:
+	@echo "检查构建依赖..."
+	@if [ ! -f "libmpc.so" ]; then \
+		echo "错误: 找不到libmpc.so，请先构建MPC库"; \
+		exit 1; \
+	fi
+	@if [ ! -f "libmpc.h" ]; then \
+		echo "错误: 找不到libmpc.h，请先生成头文件"; \
+		exit 1; \
+	fi
+	@if [ -z "$(ANDROID_NDK)" ]; then \
+		echo "错误: 请设置ANDROID_NDK环境变量"; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(ANDROID_NDK)" ]; then \
+		echo "错误: Android NDK目录不存在: $(ANDROID_NDK)"; \
+		exit 1; \
+	fi
+	@echo "依赖检查通过"
+
+# 安装到Android项目
+install-android: android-aar
+	@echo "安装到Android项目..."
+	@if [ -z "$(ANDROID_PROJECT_DIR)" ]; then \
+		echo "请设置ANDROID_PROJECT_DIR环境变量指向您的Android项目目录"; \
+		exit 1; \
+	fi
+	
+	# 复制AAR到Android项目
+	mkdir -p $(ANDROID_PROJECT_DIR)/app/libs
+	cp $(BUILD_DIR)/mpc-android-sdk.aar $(ANDROID_PROJECT_DIR)/app/libs/
+	
+	# 复制示例代码
+	mkdir -p $(ANDROID_PROJECT_DIR)/app/src/main/java/com/example/mpctest
+	cp com/example/mpctest/*.java $(ANDROID_PROJECT_DIR)/app/src/main/java/com/example/mpctest/
+	
+	@echo "安装完成，请在Android项目的build.gradle中添加:"
+	@echo "dependencies {"
+	@echo "    implementation files('libs/mpc-android-sdk.aar')"
+	@echo "}"
+
+# 构建多架构版本
+android-multi-arch:
+	@echo "构建多架构Android库..."
+	
+	# arm64-v8a
+	$(MAKE) android-lib ANDROID_ARCH=arm64-v8a
+	
+	# armeabi-v7a
+	$(MAKE) android-lib ANDROID_ARCH=armeabi-v7a \
+		CC=$(TOOLCHAIN)/bin/armv7a-linux-androideabi$(ANDROID_API_LEVEL)-clang
+	
+	# x86_64
+	$(MAKE) android-lib ANDROID_ARCH=x86_64 \
+		CC=$(TOOLCHAIN)/bin/x86_64-linux-android$(ANDROID_API_LEVEL)-clang
+	
+	@echo "多架构构建完成"
+
+# 显示帮助信息
+help:
+	@echo "Android MPC SDK 构建系统"
+	@echo ""
+	@echo "可用目标:"
+	@echo "  all                - 构建所有组件 (默认)"
+	@echo "  android-lib        - 构建Android JNI库"
+	@echo "  java-classes       - 编译Java类"
+	@echo "  jni-headers        - 生成JNI头文件"
+	@echo "  android-aar        - 构建完整的Android AAR包"
+	@echo "  android-multi-arch - 构建多架构版本"
+	@echo "  test               - 测试编译"
+	@echo "  check-deps         - 检查构建依赖"
+	@echo "  install-android    - 安装到Android项目"
+	@echo "  clean              - 清理构建文件"
+	@echo "  help               - 显示此帮助信息"
+	@echo ""
+	@echo "环境变量:"
+	@echo "  ANDROID_NDK        - Android NDK路径"
+	@echo "  ANDROID_API_LEVEL  - Android API级别 (默认: 21)"
+	@echo "  ANDROID_ARCH       - 目标架构 (默认: arm64-v8a)"
+	@echo "  ANDROID_PROJECT_DIR- Android项目目录 (用于install-android)"
+	@echo ""
+	@echo "示例:"
+	@echo "  make check-deps"
+	@echo "  make android-lib"
+	@echo "  make android-aar"
+	@echo "  ANDROID_PROJECT_DIR=/path/to/project make install-android"

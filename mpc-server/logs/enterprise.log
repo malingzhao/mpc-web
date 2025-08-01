@@ -1,0 +1,13 @@
+2025/07/30 13:14:13 Starting MPC Server: 企业服务器 (enterprise)
+2025/07/30 13:14:13 Connection Mode: server
+2025/07/30 13:14:13 Capabilities: [keygen reshare sign]
+2025/07/30 13:14:13 Starting in server mode on port 8082
+2025/07/30 13:14:13 HTTP API enabled for server enterprise
+2025/07/30 13:14:13 Server enterprise listening on :8082
+2025/07/30 13:14:13 Connecting to peer servers...
+2025/07/30 13:14:13 Connecting to peer third-party at ws://localhost:8081/ws?client_id=enterprise
+2025/07/30 13:14:13 Successfully connected to peer third-party
+2025/07/30 13:14:13 Successfully connected to peer servers
+[GIN] 2025/07/30 - 13:14:17 | 200 |     108.708µs |             ::1 | GET      "/health"
+2025/07/30 13:14:43 Disconnected from peer third-party
+2025/07/30 13:14:46 Shutting down server enterprise...
